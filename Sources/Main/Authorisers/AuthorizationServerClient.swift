@@ -53,7 +53,7 @@ public actor AuthorizationServerClient: AuthorizationServerClientType {
   public let service: AuthorisationServiceType
   public let parPoster: PostingType
   public let tokenPoster: PostingType
-  public let parEndpoint: URL
+  public var parEndpoint: URL? = nil
   public let authorizationEndpoint: URL
   public let tokenEndpoint: URL
   public let redirectionURI: URL
@@ -106,7 +106,7 @@ public actor AuthorizationServerClient: AuthorizationServerClientType {
       if let pushedAuthorizationRequestEndpoint = data.pushedAuthorizationRequestEndpoint, let url = URL(string: pushedAuthorizationRequestEndpoint) {
         self.parEndpoint = url
       } else {
-        throw ValidationError.error(reason: "In valid authorization endpoint")
+        //throw ValidationError.error(reason: "In valid authorization endpoint")
       }
     case .oauth(let data):
       
@@ -125,7 +125,7 @@ public actor AuthorizationServerClient: AuthorizationServerClientType {
       if let pushedAuthorizationRequestEndpoint = data.pushedAuthorizationRequestEndpoint, let url = URL(string: pushedAuthorizationRequestEndpoint) {
         self.parEndpoint = url
       } else {
-        throw ValidationError.error(reason: "In valid pushed authorization request endpoint")
+        //throw ValidationError.error(reason: "In valid pushed authorization request endpoint")
       }
     }
   }
@@ -167,7 +167,7 @@ public actor AuthorizationServerClient: AuthorizationServerClientType {
         ]
       )
     ) else {
-      throw ValidationError.invalidUrl(parEndpoint.absoluteString)
+      throw ValidationError.invalidUrl("AQ - INVALID URL")
     }
     
     let authorizationCodeURL = try GetAuthorizationCodeURL(
@@ -201,42 +201,64 @@ public actor AuthorizationServerClient: AuthorizationServerClientType {
     )
     
     do {
-      let response: PushedAuthorizationRequestResponse = try await service.formPost(
-        poster: parPoster,
-        url: parEndpoint,
-        request: authzRequest
-      )
-      
-      switch response {
-      case .success(let requestURI, _):
-        
-        let verifier = try PKCEVerifier(
-          codeVerifier: codeVerifier,
-          codeVerifierMethod: CodeChallenge.sha256.rawValue
-        )
-        
-        let queryParams = [
-          GetAuthorizationCodeURL.PARAM_CLIENT_ID: config.clientId,
-          GetAuthorizationCodeURL.PARAM_REQUEST_STATE: state,
-          GetAuthorizationCodeURL.PARAM_REQUEST_URI: requestURI
-        ]
-        
-        guard let urlWithParams = authorizationEndpoint.appendingQueryParameters(queryParams) else {
-          throw ValidationError.invalidUrl(parEndpoint.absoluteString)
+        if let parEndpointUrl = parEndpoint {
+            let response: PushedAuthorizationRequestResponse = try await service.formPost(
+              poster: parPoster,
+              url: parEndpointUrl,
+              request: authzRequest
+            )
+            
+            switch response {
+            case .success(let requestURI, _):
+              
+              let verifier = try PKCEVerifier(
+                codeVerifier: codeVerifier,
+                codeVerifierMethod: CodeChallenge.sha256.rawValue
+              )
+              
+              let queryParams = [
+                GetAuthorizationCodeURL.PARAM_CLIENT_ID: config.clientId,
+                GetAuthorizationCodeURL.PARAM_REQUEST_STATE: state,
+                GetAuthorizationCodeURL.PARAM_REQUEST_URI: requestURI
+              ]
+              
+              guard let urlWithParams = authorizationEndpoint.appendingQueryParameters(queryParams) else {
+                throw ValidationError.invalidUrl("AQ - INVALID URL")
+              }
+              
+              let authorizationCodeURL = try GetAuthorizationCodeURL(
+                urlString: urlWithParams.absoluteString
+              )
+              
+              return .success((verifier, authorizationCodeURL))
+              
+            case .failure(error: let error, errorDescription: let errorDescription):
+              throw CredentialIssuanceError.pushedAuthorizationRequestFailed(
+                error: error,
+                errorDescription: errorDescription
+              )
+            }
+        } else {
+            let verifier = try PKCEVerifier(
+              codeVerifier: codeVerifier,
+              codeVerifierMethod: CodeChallenge.sha256.rawValue
+            )
+            
+            let queryParams = [
+              GetAuthorizationCodeURL.PARAM_CLIENT_ID: config.clientId,
+              GetAuthorizationCodeURL.PARAM_REQUEST_STATE: state
+            ]
+            
+            guard let urlWithParams = authorizationEndpoint.appendingQueryParameters(queryParams) else {
+              throw ValidationError.invalidUrl("AQ - INVALID URL")
+            }
+            
+            let authorizationCodeURL = try GetAuthorizationCodeURL(
+              urlString: urlWithParams.absoluteString
+            )
+            
+            return .success((verifier, authorizationCodeURL))
         }
-        
-        let authorizationCodeURL = try GetAuthorizationCodeURL(
-          urlString: urlWithParams.absoluteString
-        )
-        
-        return .success((verifier, authorizationCodeURL))
-        
-      case .failure(error: let error, errorDescription: let errorDescription):
-        throw CredentialIssuanceError.pushedAuthorizationRequestFailed(
-          error: error,
-          errorDescription: errorDescription
-        )
-      }
     } catch {
       return .failure(error)
     }
