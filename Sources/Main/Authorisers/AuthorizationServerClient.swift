@@ -162,8 +162,8 @@ public actor AuthorizationServerClient: AuthorizationServerClientType {
       try authzRequest.toDictionary().convertToDictionaryOfStrings(
         excludingKeys: [
           "credential_configuration_ids",
-          "code_challenge",
-          "code_challenge_method"
+          //"code_challenge",
+          //"code_challenge_method"
         ]
       )
     ) else {
