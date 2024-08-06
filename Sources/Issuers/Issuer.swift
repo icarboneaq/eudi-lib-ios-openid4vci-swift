@@ -79,9 +79,9 @@ public actor Issuer: IssuerType {
   
   public var deferredResponseEncryptionSpec: IssuanceResponseEncryptionSpec? = nil
   
-  let authorizationServerMetadata: IdentityAndAccessManagementMetadata
-  let issuerMetadata: CredentialIssuerMetadata
-  let config: OpenId4VCIConfig
+  public let authorizationServerMetadata: IdentityAndAccessManagementMetadata
+  public let issuerMetadata: CredentialIssuerMetadata
+  public let config: OpenId4VCIConfig
   
   private let authorizer: AuthorizationServerClientType
   private let issuanceRequester: IssuanceRequesterType
@@ -142,12 +142,16 @@ public actor Issuer: IssuerType {
     
     let (scopes, credentialConfogurationIdentifiers) = try scopesAndCredentialConfigurationIds(credentialOffer: credentialOffer)
 
-    let authorizationServerSupportsPar = credentialOffer.authorizationServerMetadata.authorizationServerSupportsPar
+    let authorizationServerSupportsPar = credentialOffer.authorizationServerMetadata.authorizationServerSupportsPar && config.usePAR
 
     let state = StateValue().value
-    
+
     if authorizationServerSupportsPar {
       do {
+        let resource: String? = issuerMetadata.authorizationServers.map { _ in
+          credentialOffer.credentialIssuerIdentifier.url.absoluteString
+        }
+
         let result: (
           verifier: PKCEVerifier,
           code: GetAuthorizationCodeURL
@@ -155,7 +159,8 @@ public actor Issuer: IssuerType {
           scopes: scopes,
           credentialConfigurationIdentifiers: credentialConfogurationIdentifiers,
           state: state,
-          issuerState: issuerState
+          issuerState: issuerState,
+          resource: resource
         ).get()
         
         return .success(
@@ -228,17 +233,19 @@ public actor Issuer: IssuerType {
         )
         
         switch response {
-        case .success((let accessToken, let nonce, let identifiers)):
+        case .success((let accessToken, let nonce, let identifiers, let expiresIn)):
           if let cNonce = nonce {
             return .success(
               .proofRequired(
                 accessToken: try IssuanceAccessToken(
                   accessToken: accessToken.accessToken,
-                  tokenType: accessToken.tokenType
+                  tokenType: accessToken.tokenType, 
+                  expiresIn: TimeInterval(expiresIn ?? .zero)
                 ),
                 refreshToken: nil,
                 cNonce: cNonce,
-                credentialIdentifiers: identifiers
+                credentialIdentifiers: identifiers, 
+                timeStamp: Date().timeIntervalSinceReferenceDate
               )
             )
           } else {
@@ -246,10 +253,12 @@ public actor Issuer: IssuerType {
               .noProofRequired(
                 accessToken: try IssuanceAccessToken(
                   accessToken: accessToken.accessToken,
-                  tokenType: accessToken.tokenType
+                  tokenType: accessToken.tokenType,
+                  expiresIn: TimeInterval(expiresIn ?? .zero)
                 ),
                 refreshToken: nil,
-                credentialIdentifiers: identifiers
+                credentialIdentifiers: identifiers,
+                timeStamp: Date().timeIntervalSinceReferenceDate
               )
             )
           }
@@ -279,7 +288,8 @@ public actor Issuer: IssuerType {
             accessToken: IssuanceAccessToken,
             nonce: CNonce?,
             identifiers: AuthorizationDetailsIdentifiers?,
-            tokenType: TokenType?
+            tokenType: TokenType?,
+            expiresIn: Int?
           ) = try await authorizer.requestAccessTokenAuthFlow(
             authorizationCode: authorizationCode,
             codeVerifier: request.pkceVerifier.codeVerifier
@@ -290,11 +300,13 @@ public actor Issuer: IssuerType {
               .proofRequired(
                 accessToken: try IssuanceAccessToken(
                   accessToken: response.accessToken.accessToken,
-                  tokenType: response.tokenType
+                  tokenType: response.tokenType,
+                  expiresIn: TimeInterval(response.expiresIn ?? .zero)
                 ),
                 refreshToken: nil,
                 cNonce: cNonce,
-                credentialIdentifiers: response.identifiers
+                credentialIdentifiers: response.identifiers,
+                timeStamp: Date().timeIntervalSinceReferenceDate
               )
             )
           } else {
@@ -302,10 +314,12 @@ public actor Issuer: IssuerType {
               .noProofRequired(
                 accessToken: try IssuanceAccessToken(
                   accessToken: response.accessToken.accessToken,
-                  tokenType: response.tokenType
+                  tokenType: response.tokenType,
+                  expiresIn: TimeInterval(response.expiresIn ?? .zero)
                 ),
                 refreshToken: nil,
-                credentialIdentifiers: response.identifiers
+                credentialIdentifiers: response.identifiers,
+                timeStamp: Date().timeIntervalSinceReferenceDate
               )
             )
           }
@@ -371,9 +385,9 @@ public actor Issuer: IssuerType {
   
   private func accessToken(from request: AuthorizedRequest) -> IssuanceAccessToken {
     switch request {
-    case .noProofRequired(let token, _, _):
+    case .noProofRequired(let token, _, _, _):
       return token
-    case .proofRequired(let token, _, _, _):
+    case .proofRequired(let token, _, _, _, _):
       return token
     }
   }
@@ -382,7 +396,7 @@ public actor Issuer: IssuerType {
     switch request {
     case .noProofRequired:
       return nil
-    case .proofRequired(_, _, let cnonce, _):
+    case .proofRequired(_, _, let cnonce, _, _):
       return cnonce
     }
   }
@@ -466,7 +480,7 @@ public actor Issuer: IssuerType {
     responseEncryptionSpecProvider: (_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
   ) async throws -> Result<SubmittedRequest, Error> {
     switch noProofRequest {
-    case .noProofRequired(let token, _, _):
+    case .noProofRequired(let token, _, _, _):
       return try await requestIssuance(token: token) {
         let credentialRequests: [CredentialIssuanceRequest] = try requestPayload.map { identifier in
           guard let supportedCredential = issuerMetadata
@@ -504,7 +518,7 @@ public actor Issuer: IssuerType {
     responseEncryptionSpecProvider: (_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
   ) async throws -> Result<SubmittedRequest, Error> {
     switch proofRequest {
-    case .proofRequired(let token, _, let cNonce, _):
+    case .proofRequired(let token, _, let cNonce, _, _):
       return try await requestIssuance(token: token) {
         let credentialRequests: [CredentialIssuanceRequest] = try requestPayload.map { identifier in
           guard let supportedCredential = issuerMetadata
@@ -701,6 +715,27 @@ private extension Issuer {
 
 public extension Issuer {
   
+  static func createDeferredIssuer(
+    deferredCredentialEndpoint: CredentialIssuerEndpoint?,
+    deferredRequesterPoster: PostingType,
+    config: OpenId4VCIConfig
+  ) throws -> Issuer {
+    try Issuer(
+      authorizationServerMetadata: .oauth(
+        .init(
+            authorizationEndpoint: Constants.url,
+            tokenEndpoint: Constants.url,
+            pushedAuthorizationRequestEndpoint: Constants.url
+        )
+      ),
+      issuerMetadata: .init(
+        deferredCredentialEndpoint: deferredCredentialEndpoint
+      ),
+      config: config,
+      deferredRequesterPoster: deferredRequesterPoster
+    )
+  }
+    
   static func createResponseEncryptionSpec(_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec? {
     switch issuerResponseEncryptionMetadata {
     case .notRequired:

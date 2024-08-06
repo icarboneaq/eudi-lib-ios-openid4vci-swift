@@ -66,7 +66,7 @@ extension Wallet {
     
     switch issuerMetadata {
     case .success(let metaData):
-      if let authorizationServer = metaData?.authorizationServers.first,
+      if let authorizationServer = metaData?.authorizationServers?.first,
          let metaData {
           let resolver = AuthorizationServerMetadataResolver(
             oidcFetcher: Fetcher(session: self.session),
@@ -446,9 +446,10 @@ extension Wallet {
       case .success(let request):
         let authorizedRequest = await issuer.requestAccessToken(authorizationCode: request)
         if case let .success(authorized) = authorizedRequest,
-           case let .noProofRequired(token, _, _) = authorized {
+           case let .noProofRequired(token, _, _, _) = authorized {
           print("--> [AUTHORIZATION] Authorization code exchanged with access token : \(token.accessToken)")
           
+          let hasExpired = authorized.accessToken?.isExpired(issued: authorized.timeStamp!, at: Date().timeIntervalSinceReferenceDate)
           return authorized
         }
         
