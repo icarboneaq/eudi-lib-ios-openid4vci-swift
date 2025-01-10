@@ -26,7 +26,8 @@ public protocol IssuerType {
     credentialOffer: CredentialOffer,
     authorizationCode: IssuanceAuthorization,
     clientId: String,
-    transactionCode: String?
+    transactionCode: String?,
+    authorizationDetailsInTokenRequest: AuthorizationDetailsInTokenRequest
   ) async -> Result<AuthorizedRequest, Error>
   
   func handleAuthorizationCode(
@@ -34,45 +35,35 @@ public protocol IssuerType {
     authorizationCode: IssuanceAuthorization
   ) async -> Result<UnauthorizedRequest, Error>
   
-  func requestAccessToken(
-    authorizationCode: UnauthorizedRequest
+  func authorizeWithAuthorizationCode(
+    authorizationCode: UnauthorizedRequest,
+    authorizationDetailsInTokenRequest: AuthorizationDetailsInTokenRequest
   ) async -> Result<AuthorizedRequest, Error>
   
-  func requestSingle(
+  func request(
     noProofRequest: AuthorizedRequest,
     requestPayload: IssuanceRequestPayload,
     responseEncryptionSpecProvider: (_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
   ) async throws -> Result<SubmittedRequest, Error>
   
-  func requestSingle(
+  func request(
     proofRequest: AuthorizedRequest,
-    bindingKey: BindingKey,
+    bindingKeys: [BindingKey],
     requestPayload: IssuanceRequestPayload,
     responseEncryptionSpecProvider: (_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
   ) async throws -> Result<SubmittedRequest, Error>
   
   func requestDeferredIssuance(
     proofRequest: AuthorizedRequest,
-    transactionId: TransactionId
+    transactionId: TransactionId,
+    dPopNonce: Nonce?
   ) async throws -> Result<DeferredCredentialIssuanceResponse, Error>
   
   func notify(
     authorizedRequest: AuthorizedRequest,
-    notificationId: NotificationObject
+    notificationId: NotificationObject,
+    dPopNonce: Nonce?
   ) async throws -> Result<Void, Error>
-  
-  func requestBatch(
-    noProofRequest: AuthorizedRequest,
-    requestPayload: [IssuanceRequestPayload],
-    responseEncryptionSpecProvider: (_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
-  ) async throws -> Result<SubmittedRequest, Error>
-  
-  func requestBatch(
-    proofRequest: AuthorizedRequest,
-    bindingKey: BindingKey,
-    requestPayload: [IssuanceRequestPayload],
-    responseEncryptionSpecProvider: (_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
-  ) async throws -> Result<SubmittedRequest, Error>
 }
 
 public actor Issuer: IssuerType {
@@ -134,7 +125,8 @@ public actor Issuer: IssuerType {
   ) async throws -> Result<UnauthorizedRequest, Error> {
     let credentials = credentialOffer.credentialConfigurationIdentifiers
     let issuerState: String? = switch credentialOffer.grants {
-    case .authorizationCode(let code), .both(let code, _):
+    case .authorizationCode(let code),
+         .both(let code, _):
       code.issuerState
     default:
       nil
@@ -154,13 +146,16 @@ public actor Issuer: IssuerType {
 
         let result: (
           verifier: PKCEVerifier,
-          code: GetAuthorizationCodeURL
+          code: GetAuthorizationCodeURL,
+          dPopNonce: Nonce?
         ) = try await authorizer.submitPushedAuthorizationRequest(
           scopes: scopes,
           credentialConfigurationIdentifiers: credentialConfogurationIdentifiers,
           state: state,
           issuerState: issuerState,
-          resource: resource
+          resource: resource,
+          dpopNonce: nil,
+          retry: true
         ).get()
         
         return .success(
@@ -169,7 +164,9 @@ public actor Issuer: IssuerType {
               credentials: try credentials.map { try CredentialIdentifier(value: $0.value) },
               getAuthorizationCodeURL: result.code,
               pkceVerifier: result.verifier,
-              state: state
+              state: state,
+              configurationIds: credentialConfogurationIdentifiers,
+              dpopNonce: result.dPopNonce
             )
           )
         )
@@ -194,7 +191,8 @@ public actor Issuer: IssuerType {
               credentials: try credentials.map { try CredentialIdentifier(value: $0.value) },
               getAuthorizationCodeURL: result.code,
               pkceVerifier: result.verifier,
-              state: state
+              state: state,
+              configurationIds: credentialConfogurationIdentifiers
             )
           )
         )
@@ -209,7 +207,8 @@ public actor Issuer: IssuerType {
     credentialOffer: CredentialOffer,
     authorizationCode: IssuanceAuthorization,
     clientId: String,
-    transactionCode: String?
+    transactionCode: String?,
+    authorizationDetailsInTokenRequest: AuthorizationDetailsInTokenRequest = .doNotInclude
   ) async -> Result<AuthorizedRequest, Error> {
     
     switch authorizationCode {
@@ -225,15 +224,25 @@ public actor Issuer: IssuerType {
             }
         }
         
+        let credConfigIdsAsAuthDetails: [CredentialConfigurationIdentifier] = switch authorizationDetailsInTokenRequest {
+        case .doNotInclude: []
+        case .include(let filter): credentialOffer.credentialConfigurationIdentifiers.filter(filter)
+        }
+        
         let response = try await authorizer.requestAccessTokenPreAuthFlow(
           preAuthorizedCode: authorisation,
           txCode: txCode,
           clientId: clientId,
-          transactionCode: transactionCode
+          transactionCode: transactionCode,
+          identifiers: credConfigIdsAsAuthDetails,
+          dpopNonce: nil,
+          retry: true
         )
         
         switch response {
-        case .success((let accessToken, let nonce, let identifiers, let expiresIn)):
+        case .success(
+          (let accessToken, let nonce, let identifiers, let expiresIn, let dPopNonce)
+        ):
           if let cNonce = nonce {
             return .success(
               .proofRequired(
@@ -245,7 +254,8 @@ public actor Issuer: IssuerType {
                 refreshToken: nil,
                 cNonce: cNonce,
                 credentialIdentifiers: identifiers, 
-                timeStamp: Date().timeIntervalSinceReferenceDate
+                timeStamp: Date().timeIntervalSinceReferenceDate,
+                dPopNonce: dPopNonce
               )
             )
           } else {
@@ -258,7 +268,8 @@ public actor Issuer: IssuerType {
                 ),
                 refreshToken: nil,
                 credentialIdentifiers: identifiers,
-                timeStamp: Date().timeIntervalSinceReferenceDate
+                timeStamp: Date().timeIntervalSinceReferenceDate,
+                dPopNonce: dPopNonce
               )
             )
           }
@@ -275,24 +286,38 @@ public actor Issuer: IssuerType {
     }
   }
   
-  public func requestAccessToken(authorizationCode: UnauthorizedRequest) async -> Result<AuthorizedRequest, Error> {
+  public func authorizeWithAuthorizationCode(
+    authorizationCode: UnauthorizedRequest,
+    authorizationDetailsInTokenRequest: AuthorizationDetailsInTokenRequest = .doNotInclude
+  ) async -> Result<AuthorizedRequest, Error> {
     switch authorizationCode {
     case .par:
-      return .failure(ValidationError.error(reason: ".authorizationCode case is required"))
+      return .failure(
+        ValidationError.error(reason: ".authorizationCode case is required")
+      )
       
     case .authorizationCode(let request):
       switch request.authorizationCode {
-      case .authorizationCode(authorizationCode: let authorizationCode):
+      case .authorizationCode(let authorizationCode):
         do {
+          let credConfigIdsAsAuthDetails: [CredentialConfigurationIdentifier] = switch authorizationDetailsInTokenRequest {
+          case .doNotInclude: []
+          case .include(let filter): request.configurationIds.filter(filter)
+          }
+          
           let response: (
             accessToken: IssuanceAccessToken,
             nonce: CNonce?,
             identifiers: AuthorizationDetailsIdentifiers?,
             tokenType: TokenType?,
-            expiresIn: Int?
+            expiresIn: Int?,
+            dPopNonce: Nonce?
           ) = try await authorizer.requestAccessTokenAuthFlow(
             authorizationCode: authorizationCode,
-            codeVerifier: request.pkceVerifier.codeVerifier
+            codeVerifier: request.pkceVerifier.codeVerifier,
+            identifiers: credConfigIdsAsAuthDetails,
+            dpopNonce: nil,
+            retry: true
           ).get()
           
           if let cNonce = response.nonce {
@@ -306,7 +331,8 @@ public actor Issuer: IssuerType {
                 refreshToken: nil,
                 cNonce: cNonce,
                 credentialIdentifiers: response.identifiers,
-                timeStamp: Date().timeIntervalSinceReferenceDate
+                timeStamp: Date().timeIntervalSinceReferenceDate,
+                dPopNonce: response.dPopNonce
               )
             )
           } else {
@@ -319,14 +345,16 @@ public actor Issuer: IssuerType {
                 ),
                 refreshToken: nil,
                 credentialIdentifiers: response.identifiers,
-                timeStamp: Date().timeIntervalSinceReferenceDate
+                timeStamp: Date().timeIntervalSinceReferenceDate,
+                dPopNonce: response.dPopNonce
               )
             )
           }
         } catch {
           return .failure(ValidationError.error(reason: error.localizedDescription))
         }
-      default: return .failure(ValidationError.error(reason: ".authorizationCode case is required"))
+      default: return .failure(
+        ValidationError.error(reason: ".authorizationCode case is required"))
       }
     }
   }
@@ -343,7 +371,8 @@ public actor Issuer: IssuerType {
             try .init(
               credentials: request.credentials,
               authorizationCode: try IssuanceAuthorization(authorizationCode: code),
-              pkceVerifier: request.pkceVerifier
+              pkceVerifier: request.pkceVerifier,
+              configurationIds: request.configurationIds
             )
           )
         )
@@ -369,7 +398,8 @@ public actor Issuer: IssuerType {
               try .init(
                 credentials: request.credentials,
                 authorizationCode: try IssuanceAuthorization(authorizationCode: authorizationCode),
-                pkceVerifier: request.pkceVerifier
+                pkceVerifier: request.pkceVerifier,
+                configurationIds: request.configurationIds
               )
             )
           )
@@ -385,9 +415,9 @@ public actor Issuer: IssuerType {
   
   private func accessToken(from request: AuthorizedRequest) -> IssuanceAccessToken {
     switch request {
-    case .noProofRequired(let token, _, _, _):
+    case .noProofRequired(let token, _, _, _, _):
       return token
-    case .proofRequired(let token, _, _, _, _):
+    case .proofRequired(let token, _, _, _, _, _):
       return token
     }
   }
@@ -396,12 +426,12 @@ public actor Issuer: IssuerType {
     switch request {
     case .noProofRequired:
       return nil
-    case .proofRequired(_, _, let cnonce, _, _):
+    case .proofRequired(_, _, let cnonce, _, _, _):
       return cnonce
     }
   }
   
-  public func requestSingle(
+  public func request(
     noProofRequest: AuthorizedRequest,
     requestPayload: IssuanceRequestPayload,
     responseEncryptionSpecProvider: (_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
@@ -417,6 +447,7 @@ public actor Issuer: IssuerType {
       let credentialIdentifier
     ):
       return try await identifierBasedRequest(
+        authorizedRequest: noProofRequest,
         token: token,
         credentialIdentifier: credentialIdentifier,
         credentialConfigurationIdentifier: credentialConfigurationIdentifier,
@@ -428,7 +459,8 @@ public actor Issuer: IssuerType {
       let claimSet
     ):
       return try await formatBasedRequest(
-        token: token, 
+        authorizedRequest: noProofRequest,
+        token: token,
         claimSet: claimSet,
         credentialConfigurationIdentifier: credentialConfigurationIdentifier,
         responseEncryptionSpecProvider: responseEncryptionSpecProvider
@@ -436,9 +468,9 @@ public actor Issuer: IssuerType {
     }
   }
   
-  public func requestSingle(
+  public func request(
     proofRequest: AuthorizedRequest,
-    bindingKey: BindingKey,
+    bindingKeys: [BindingKey],
     requestPayload: IssuanceRequestPayload,
     responseEncryptionSpecProvider: (_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
   ) async throws -> Result<SubmittedRequest, Error> {
@@ -452,8 +484,9 @@ public actor Issuer: IssuerType {
       let credentialIdentifier
     ):
       return try await identifierBasedRequest(
+        authorizedRequest: proofRequest,
         token: token,
-        bindingKey: bindingKey,
+        bindingKeys: bindingKeys,
         credentialIdentifier: credentialIdentifier,
         credentialConfigurationIdentifier: credentialConfigurationIdentifier,
         responseEncryptionSpecProvider: responseEncryptionSpecProvider
@@ -464,93 +497,14 @@ public actor Issuer: IssuerType {
       let claimSet
     ):
       return try await formatBasedRequest(
+        authorizedRequest: proofRequest,
         token: token,
         claimSet: claimSet,
-        bindingKey: bindingKey,
+        bindingKeys: bindingKeys,
         cNonce: cNonce(from: proofRequest),
         credentialConfigurationIdentifier: credentialConfigurationIdentifier,
         responseEncryptionSpecProvider: responseEncryptionSpecProvider
       )
-    }
-  }
-  
-  public func requestBatch(
-    noProofRequest: AuthorizedRequest,
-    requestPayload: [IssuanceRequestPayload],
-    responseEncryptionSpecProvider: (_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
-  ) async throws -> Result<SubmittedRequest, Error> {
-    switch noProofRequest {
-    case .noProofRequired(let token, _, _, _):
-      return try await requestIssuance(token: token) {
-        let credentialRequests: [CredentialIssuanceRequest] = try requestPayload.map { identifier in
-          guard let supportedCredential = issuerMetadata
-            .credentialsSupported[identifier.credentialConfigurationIdentifier] else {
-            throw ValidationError.error(reason: "Invalid Supported credential for requestBatch")
-          }
-          return try supportedCredential.toIssuanceRequest(
-            requester: issuanceRequester,
-            claimSet: identifier.claimSet,
-            responseEncryptionSpecProvider: responseEncryptionSpecProvider
-          )
-        }
-        
-        let batch: [SingleCredential] = credentialRequests.compactMap { credentialIssuanceRequest in
-          switch credentialIssuanceRequest {
-          case .single(let credential, _):
-            return credential
-          default:
-            return nil
-          }
-        }
-        return .batch(
-          batch,
-          deferredResponseEncryptionSpec
-        )
-      }
-    default: return .failure(ValidationError.error(reason: ".noProofRequired is required"))
-    }
-  }
-  
-  public func requestBatch(
-    proofRequest: AuthorizedRequest,
-    bindingKey: BindingKey,
-    requestPayload: [IssuanceRequestPayload],
-    responseEncryptionSpecProvider: (_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
-  ) async throws -> Result<SubmittedRequest, Error> {
-    switch proofRequest {
-    case .proofRequired(let token, _, let cNonce, _, _):
-      return try await requestIssuance(token: token) {
-        let credentialRequests: [CredentialIssuanceRequest] = try requestPayload.map { identifier in
-          guard let supportedCredential = issuerMetadata
-            .credentialsSupported[identifier.credentialConfigurationIdentifier] else {
-            throw ValidationError.error(reason: "Invalid Supported credential for requestBatch")
-          }
-          return try supportedCredential.toIssuanceRequest(
-            requester: issuanceRequester,
-            claimSet: identifier.claimSet,
-            proof: bindingKey.toSupportedProof(
-              issuanceRequester: issuanceRequester,
-              credentialSpec: supportedCredential,
-              cNonce: cNonce.value
-            ),
-            responseEncryptionSpecProvider: responseEncryptionSpecProvider
-          )
-        }
-        
-        let batch: [SingleCredential] = credentialRequests.compactMap { credentialIssuanceRequest in
-          switch credentialIssuanceRequest {
-          case .single(let credential, _):
-            return credential
-          default:
-            return nil
-          }
-        }
-        return .batch(
-          batch,
-          deferredResponseEncryptionSpec
-        )
-      }
-    default: return .failure(ValidationError.error(reason: ".noProofRequired is required"))
     }
   }
 }
@@ -559,27 +513,18 @@ private extension Issuer {
   
   private func requestIssuance(
     token: IssuanceAccessToken,
-    issuanceRequestSupplier: () throws -> CredentialIssuanceRequest
+    dPopNonce: Nonce?,
+    issuanceRequestSupplier: () async throws -> CredentialIssuanceRequest
   ) async throws -> Result<SubmittedRequest, Error> {
-    let credentialRequest = try issuanceRequestSupplier()
+    let credentialRequest = try await issuanceRequestSupplier()
     switch credentialRequest {
     case .single(let single, let encryptionSpec):
       self.deferredResponseEncryptionSpec = encryptionSpec
       let result = try await issuanceRequester.placeIssuanceRequest(
         accessToken: token,
-        request: single
-      )
-      switch result {
-      case .success(let response):
-        return .success(.success(response: response))
-      case .failure(let error):
-        return handleIssuanceError(error)
-      }
-    case .batch(let credentials, let encryptionSpec):
-      self.deferredResponseEncryptionSpec = encryptionSpec
-      let result = try await issuanceRequester.placeBatchIssuanceRequest(
-        accessToken: token,
-        request: credentials
+        request: single,
+        dPopNonce: dPopNonce,
+        retry: true
       )
       switch result {
       case .success(let response):
@@ -589,7 +534,7 @@ private extension Issuer {
           )
         )
       case .failure(let error):
-        throw ValidationError.error(reason: error.localizedDescription)
+        return handleIssuanceError(error)
       }
     }
   }
@@ -657,9 +602,10 @@ private extension Issuer {
   }
   
   func formatBasedRequest(
+    authorizedRequest: AuthorizedRequest,
     token: IssuanceAccessToken,
     claimSet: ClaimSet?,
-    bindingKey: BindingKey? = nil,
+    bindingKeys: [BindingKey] = [],
     cNonce: CNonce? = nil,
     credentialConfigurationIdentifier: CredentialConfigurationIdentifier,
     responseEncryptionSpecProvider: (_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
@@ -670,23 +616,31 @@ private extension Issuer {
       throw ValidationError.error(reason: "Invalid Supported credential for requestSingle")
     }
     
-    return try await requestIssuance(token: token) {
+    let proofs = try await obtainProofs(
+      authorizedRequest: authorizedRequest,
+      batchCredentialIssuance: issuerMetadata.batchCredentialIssuance,
+      bindingKeys: bindingKeys,
+      supportedCredential: supportedCredential,
+      cNonce: cNonce
+    )
+    
+    return try await requestIssuance(
+      token: token,
+      dPopNonce: authorizedRequest.dPopNonce
+    ) {
       return try supportedCredential.toIssuanceRequest(
         requester: issuanceRequester,
         claimSet: claimSet, 
-        proof: bindingKey?.toSupportedProof(
-          issuanceRequester: issuanceRequester,
-          credentialSpec: supportedCredential,
-          cNonce: cNonce?.value
-        ),
+        proofs: proofs,
         responseEncryptionSpecProvider: responseEncryptionSpecProvider
       )
     }
   }
   
   func identifierBasedRequest(
+    authorizedRequest: AuthorizedRequest,
     token: IssuanceAccessToken,
-    bindingKey: BindingKey? = nil,
+    bindingKeys: [BindingKey] = [],
     cNonce: CNonce? = nil,
     credentialIdentifier: CredentialIdentifier,
     credentialConfigurationIdentifier: CredentialConfigurationIdentifier,
@@ -698,17 +652,55 @@ private extension Issuer {
       throw ValidationError.error(reason: "Invalid Supported credential for requestSingle")
     }
     
-    return try await requestIssuance(token: token) {
+    let proofs = try await obtainProofs(
+      authorizedRequest: authorizedRequest,
+      batchCredentialIssuance: issuerMetadata.batchCredentialIssuance,
+      bindingKeys: bindingKeys,
+      supportedCredential: supportedCredential,
+      cNonce: cNonce
+    )
+    
+    return try await requestIssuance(
+      token: token,
+      dPopNonce: authorizedRequest.dPopNonce
+    ) {
       return try supportedCredential.toIssuanceRequest(
         requester: issuanceRequester,
-        proof: bindingKey?.toSupportedProof(
-          issuanceRequester: issuanceRequester,
-          credentialSpec: supportedCredential,
-          cNonce: cNonce?.value
-        ),
+        proofs: proofs,
         credentialIdentifier: credentialIdentifier,
         responseEncryptionSpecProvider: responseEncryptionSpecProvider
       )
+    }
+  }
+  
+  func obtainProofs(
+    authorizedRequest: AuthorizedRequest,
+    batchCredentialIssuance: BatchCredentialIssuance?,
+    bindingKeys: [BindingKey],
+    supportedCredential: CredentialSupported,
+    cNonce: CNonce?
+  ) async throws -> [Proof] {
+    let proofs = await (try? bindingKeys.asyncCompactMap { try await $0.toSupportedProof(
+      issuanceRequester: issuanceRequester,
+      credentialSpec: supportedCredential,
+      cNonce: cNonce?.value
+    )}) ?? []
+    switch proofs.count {
+    case 0:
+      switch authorizedRequest {
+      case .noProofRequired:
+        return proofs
+      case .proofRequired:
+        throw ValidationError.error(reason: "At least one binding is required in AuthorizedRequest.proofRequired")
+      }
+    case 1:
+      return proofs
+    default:
+      if let batchSize = batchCredentialIssuance?.batchSize,
+         proofs.count > batchSize {
+        throw ValidationError.issuerBatchSizeLimitExceeded(batchSize)
+      }
+      return proofs
     }
   }
 }
@@ -739,9 +731,16 @@ public extension Issuer {
   static func createResponseEncryptionSpec(_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec? {
     switch issuerResponseEncryptionMetadata {
     case .notRequired:
-      return Self.createResponseEncryptionSpecFrom(algorithmsSupported: [.init(.RSA_OAEP_256)], encryptionMethodsSupported: [.init(.A128CBC_HS256)])
+      return Self.createResponseEncryptionSpecFrom(
+        algorithmsSupported: [.init(.RSA_OAEP_256)],
+        encryptionMethodsSupported: [.init(.A128CBC_HS256)]
+      )
+      
     case let .required(algorithmsSupported, encryptionMethodsSupported):
-      return Self.createResponseEncryptionSpecFrom(algorithmsSupported: algorithmsSupported, encryptionMethodsSupported: encryptionMethodsSupported)
+      return Self.createResponseEncryptionSpecFrom(
+        algorithmsSupported: algorithmsSupported,
+        encryptionMethodsSupported: encryptionMethodsSupported
+      )
     }
   }
   
@@ -808,7 +807,8 @@ public extension Issuer {
   
   func requestDeferredIssuance(
     proofRequest: AuthorizedRequest,
-    transactionId: TransactionId
+    transactionId: TransactionId,
+    dPopNonce: Nonce?
   ) async throws -> Result<DeferredCredentialIssuanceResponse, Error> {
     
     guard let token = proofRequest.accessToken else {
@@ -818,18 +818,22 @@ public extension Issuer {
     return try await deferredIssuanceRequester.placeDeferredCredentialRequest(
       accessToken: token,
       transactionId: transactionId,
+      dPopNonce: dPopNonce,
+      retry: true,
       issuanceResponseEncryptionSpec: deferredResponseEncryptionSpec
     )
   }
   
   func notify(
     authorizedRequest: AuthorizedRequest,
-    notificationId: NotificationObject
+    notificationId: NotificationObject,
+    dPopNonce: Nonce?
   ) async throws -> Result<Void, Error> {
     
     return try await notifyIssuer.notify(
       authorizedRequest: authorizedRequest,
-      notification: notificationId
+      notification: notificationId,
+      dPopNonce: dPopNonce
     )
   }
 }

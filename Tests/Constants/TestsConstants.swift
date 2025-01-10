@@ -14,20 +14,19 @@
  * limitations under the License.
  */
 import Foundation
+import JOSESwift
+
 @testable import OpenID4VCI
 
-//let CREDENTIAL_ISSUER_PUBLIC_URL = "http://localhost:8080"
-
-//let CREDENTIAL_ISSUER_PUBLIC_URL = "https://dev.issuer.eudiw.dev"
-//let PID_SdJwtVC_config_id = "eu.europa.ec.eudi.mdl_jwt_vc_json"
-//let PID_MsoMdoc_config_id = "eu.europa.ec.eudi.pid_mdoc"
-//let MDL_config_id = "eu.europa.ec.eudi.mdl_mdoc"
-
-//let CREDENTIAL_ISSUER_PUBLIC_URL = "https://localhost/pid-issuer"
 let CREDENTIAL_ISSUER_PUBLIC_URL = "https://dev.issuer-backend.eudiw.dev"
 let MDL_config_id = "org.iso.18013.5.1.mDL"
 let PID_MsoMdoc_config_id = "eu.europa.ec.eudi.pid_mso_mdoc"
 let PID_SdJwtVC_config_id = "eu.europa.ec.eudi.pid_vc_sd_jwt"
+
+//let CREDENTIAL_ISSUER_PUBLIC_URL = "https://dev.issuer.eudiw.dev"
+//let PID_SdJwtVC_config_id = "eu.europa.ec.eudi.pid_jwt_vc_json"
+//let PID_MsoMdoc_config_id = "eu.europa.ec.eudi.pid_mdoc"
+//let MDL_config_id = "eu.europa.ec.eudi.mdl_mdoc"
 
 //let CredentialIssuer_URL = "https://preprod.issuer.eudiw.dev/oidc"
 //let PID_SdJwtVC_SCOPE = "eu.europa.ec.eudi.pid_jwt_vc_json"
@@ -80,7 +79,7 @@ let MDL_CredentialOffer = """
 
 let config: OpenId4VCIConfig = .init(
   clientId: "wallet-dev",
-  authFlowRedirectionURI: URL(string: "urn:ietf:wg:oauth:2.0:oob")!, 
+  authFlowRedirectionURI: URL(string: "urn:ietf:wg:oauth:2.0:oob")!,
   authorizeIssuanceConfig: .favorScopes
 )
 
@@ -138,7 +137,8 @@ struct TestsConstants {
       pkceVerifier: (try? .init(
         codeVerifier: "GVaOE~J~xQmkE4aCKm4RNYviYW5QaFiFOxVv-8enIDL",
         codeVerifierMethod: "S256"))!,
-      state: "5A201471-D088-4544-B1E9-5476E5935A95"
+      state: "5A201471-D088-4544-B1E9-5476E5935A95",
+      configurationIds: [try! .init(value: "my_credential_configuration_id")]
     )
   )
   
@@ -148,7 +148,7 @@ struct TestsConstants {
         path: "credential_issuer_metadata",
         extension: "json"
       )
-    ))
+      ))
     
     let authorizationServerMetadataResolver = AuthorizationServerMetadataResolver(
       oidcFetcher: Fetcher<OIDCProviderMetadata>(session: NetworkingMock(
@@ -181,7 +181,40 @@ struct TestsConstants {
         path: "openid-credential-issuer_no_encryption",
         extension: "json"
       )
-    ))
+      ))
+    
+    let authorizationServerMetadataResolver = AuthorizationServerMetadataResolver(
+      oidcFetcher: Fetcher<OIDCProviderMetadata>(session: NetworkingMock(
+        path: "oidc_authorization_server_metadata",
+        extension: "json"
+      )),
+      oauthFetcher: Fetcher<AuthorizationServerMetadata>(session: NetworkingMock(
+        path: "test",
+        extension: "json"
+      ))
+    )
+    
+    let credentialOfferRequestResolver = CredentialOfferRequestResolver(
+      fetcher: Fetcher<CredentialOfferRequestObject>(session: NetworkingMock(
+        path: "credential_offer_with_blank_pre_authorized_code",
+        extension: "json"
+      )),
+      credentialIssuerMetadataResolver: credentialIssuerMetadataResolver,
+      authorizationServerMetadataResolver: authorizationServerMetadataResolver
+    )
+    
+    return try? await credentialOfferRequestResolver.resolve(
+      source: .fetchByReference(url: .stub())
+    ).get()
+  }
+  
+  static func createMockCredentialOfferValidEncryptionWithBatchLimit() async -> CredentialOffer? {
+    let credentialIssuerMetadataResolver = CredentialIssuerMetadataResolver(
+      fetcher: Fetcher<CredentialIssuerMetadata>(session: NetworkingMock(
+        path: "openid-credential-issuer_no_encryption_batch",
+        extension: "json"
+      )
+      ))
     
     let authorizationServerMetadataResolver = AuthorizationServerMetadataResolver(
       oidcFetcher: Fetcher<OIDCProviderMetadata>(session: NetworkingMock(
@@ -214,7 +247,7 @@ struct TestsConstants {
         path: "credential_issuer_metadata",
         extension: "json"
       )
-    ))
+      ))
     
     let authorizationServerMetadataResolver = AuthorizationServerMetadataResolver(
       oidcFetcher: Fetcher<OIDCProviderMetadata>(session: NetworkingMock(
@@ -239,5 +272,49 @@ struct TestsConstants {
     return try? await credentialOfferRequestResolver.resolve(
       source: .fetchByReference(url: .stub())
     ).get()
+  }
+}
+
+class TestSinger: AsyncSignerProtocol {
+  let privateKey: SecKey
+  
+  init(privateKey: SecKey) {
+    self.privateKey = privateKey
+  }
+  
+  func signAsync(_ header: Data, _ payload: Data) async throws -> Data {
+    
+    guard
+      let jwsHeader = JWSHeader(header),
+      let algorithm = jwsHeader.algorithm
+    else {
+      throw NSError(
+        domain: "SignerErrorDomain",
+        code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "Unable to create signer"]
+      )
+    }
+    
+    /// Create the signer
+    guard let signer = Signer(
+      signatureAlgorithm: algorithm,
+      key: privateKey
+    ) else {
+      throw NSError(
+        domain: "SignerErrorDomain",
+        code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "Unable to create signer"]
+      )
+    }
+    
+    let jws = try JWS(
+      header: jwsHeader,
+      payload: .init(
+        payload
+      ),
+      signer: signer
+    )
+    
+    return jws.signature
   }
 }

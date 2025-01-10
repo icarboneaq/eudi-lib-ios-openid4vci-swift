@@ -46,7 +46,7 @@ class VCIFlowWithOffer: XCTestCase {
     let bindingKey: BindingKey = .jwk(
       algorithm: alg,
       jwk: publicKeyJWK,
-      privateKey: privateKey
+      privateKey: .secKey(privateKey)
     )
     
     let user = ActingUser(
@@ -56,7 +56,56 @@ class VCIFlowWithOffer: XCTestCase {
     
     let wallet = Wallet(
       actingUser: user,
-      bindingKey: bindingKey, 
+      bindingKeys: [bindingKey],
+      dPoPConstructor: nil,
+      session: Wallet.walletSession
+    )
+    
+    do {
+      try await walletInitiatedIssuanceWithOfferSdJWT(
+        wallet: wallet
+      )
+    } catch {
+      
+      XCTExpectFailure()
+      XCTAssert(false, error.localizedDescription)
+    }
+    
+    XCTAssert(true)
+  }
+  
+  func testWithOfferSdJWTWithSigner() async throws {
+    
+    let privateKey = try KeyController.generateECDHPrivateKey()
+    let publicKey = try KeyController.generateECDHPublicKey(from: privateKey)
+    
+    let alg = JWSAlgorithm(.ES256)
+    let publicKeyJWK = try ECPublicKey(
+      publicKey: publicKey,
+      additionalParameters: [
+        "alg": alg.name,
+        "use": "sig",
+        "kid": UUID().uuidString
+      ])
+    
+    let bindingKey: BindingKey = .jwk(
+      algorithm: alg,
+      jwk: publicKeyJWK,
+      privateKey: .custom(
+        TestSinger(
+          privateKey: privateKey
+        )
+      )
+    )
+    
+    let user = ActingUser(
+      username: "tneal",
+      password: "password"
+    )
+    
+    let wallet = Wallet(
+      actingUser: user,
+      bindingKeys: [bindingKey],
       dPoPConstructor: nil,
       session: Wallet.walletSession
     )
@@ -91,7 +140,7 @@ class VCIFlowWithOffer: XCTestCase {
     let bindingKey: BindingKey = .jwk(
       algorithm: alg,
       jwk: publicKeyJWK,
-      privateKey: privateKey
+      privateKey: .secKey(privateKey)
     )
     
     let user = ActingUser(
@@ -101,7 +150,7 @@ class VCIFlowWithOffer: XCTestCase {
     
     let wallet = Wallet(
       actingUser: user,
-      bindingKey: bindingKey,
+      bindingKeys: [bindingKey],
       dPoPConstructor: nil
     )
     
@@ -135,7 +184,7 @@ class VCIFlowWithOffer: XCTestCase {
     let bindingKey: BindingKey = .jwk(
       algorithm: alg,
       jwk: publicKeyJWK,
-      privateKey: privateKey
+      privateKey: .secKey(privateKey)
     )
     
     let user = ActingUser(
@@ -145,7 +194,7 @@ class VCIFlowWithOffer: XCTestCase {
     
     let wallet = Wallet(
       actingUser: user,
-      bindingKey: bindingKey,
+      bindingKeys: [bindingKey],
       dPoPConstructor: nil
     )
     
@@ -179,7 +228,7 @@ class VCIFlowWithOffer: XCTestCase {
     let bindingKey: BindingKey = .jwk(
       algorithm: alg,
       jwk: publicKeyJWK,
-      privateKey: privateKey
+      privateKey: .secKey(privateKey)
     )
     
     let user = ActingUser(
@@ -189,7 +238,7 @@ class VCIFlowWithOffer: XCTestCase {
     
     let wallet = Wallet(
       actingUser: user,
-      bindingKey: bindingKey,
+      bindingKeys: [bindingKey],
       dPoPConstructor: nil,
       session: Wallet.walletSession
     )
@@ -224,7 +273,7 @@ class VCIFlowWithOffer: XCTestCase {
     let bindingKey: BindingKey = .jwk(
       algorithm: alg,
       jwk: publicKeyJWK,
-      privateKey: privateKey
+      privateKey: .secKey(privateKey)
     )
     
     let user = ActingUser(
@@ -234,7 +283,7 @@ class VCIFlowWithOffer: XCTestCase {
     
     let wallet = Wallet(
       actingUser: user,
-      bindingKey: bindingKey,
+      bindingKeys: [bindingKey],
       dPoPConstructor: nil
     )
     
@@ -266,10 +315,11 @@ class VCIFlowWithOffer: XCTestCase {
         "kid": UUID().uuidString
       ])
     
+    let privateKeyProxy: SigningKeyProxy = .secKey(privateKey)
     let bindingKey: BindingKey = .jwk(
       algorithm: alg,
       jwk: publicKeyJWK,
-      privateKey: privateKey
+      privateKey: privateKeyProxy
     )
     
     let user = ActingUser(
@@ -279,16 +329,114 @@ class VCIFlowWithOffer: XCTestCase {
     
     let wallet = Wallet(
       actingUser: user,
-      bindingKey: bindingKey,
+      bindingKeys: [bindingKey],
       dPoPConstructor: DPoPConstructor(
         algorithm: alg,
         jwk: publicKeyJWK,
-        privateKey: privateKey
+        privateKey: privateKeyProxy
       )
     )
     
     do {
       try await walletInitiatedIssuanceWithOfferMDL_DPoP(
+        wallet: wallet
+      )
+    } catch {
+      
+      XCTExpectFailure()
+      XCTAssert(false, error.localizedDescription)
+    }
+    
+    XCTAssert(true)
+  }
+  
+  func testWithOfferSdJwtDPoP() async throws {
+    
+    let privateKey = try KeyController.generateECDHPrivateKey()
+    let publicKey = try KeyController.generateECDHPublicKey(from: privateKey)
+    
+    let alg = JWSAlgorithm(.ES256)
+    let publicKeyJWK = try ECPublicKey(
+      publicKey: publicKey,
+      additionalParameters: [
+        "alg": alg.name,
+        "use": "sig",
+        "kid": UUID().uuidString
+      ])
+    
+    let privateKeyProxy: SigningKeyProxy = .secKey(privateKey)
+    let bindingKey: BindingKey = .jwk(
+      algorithm: alg,
+      jwk: publicKeyJWK,
+      privateKey: privateKeyProxy
+    )
+    
+    let user = ActingUser(
+      username: "tneal",
+      password: "password"
+    )
+    
+    let wallet = Wallet(
+      actingUser: user,
+      bindingKeys: [bindingKey],
+      dPoPConstructor: DPoPConstructor(
+        algorithm: alg,
+        jwk: publicKeyJWK,
+        privateKey: privateKeyProxy
+      )
+    )
+    
+    do {
+      try await walletInitiatedIssuanceWithOfferSDJWT_DPoP(
+        wallet: wallet
+      )
+    } catch {
+      
+      XCTExpectFailure()
+      XCTAssert(false, error.localizedDescription)
+    }
+    
+    XCTAssert(true)
+  }
+  
+  func testWithOfferMultipleSdJwtDPoP() async throws {
+    
+    let privateKey = try KeyController.generateECDHPrivateKey()
+    let publicKey = try KeyController.generateECDHPublicKey(from: privateKey)
+    
+    let alg = JWSAlgorithm(.ES256)
+    let publicKeyJWK = try ECPublicKey(
+      publicKey: publicKey,
+      additionalParameters: [
+        "alg": alg.name,
+        "use": "sig",
+        "kid": UUID().uuidString
+      ])
+    
+    let privateKeyProxy: SigningKeyProxy = .secKey(privateKey)
+    let bindingKey: BindingKey = .jwk(
+      algorithm: alg,
+      jwk: publicKeyJWK,
+      privateKey: privateKeyProxy
+    )
+    
+    let user = ActingUser(
+      username: "tneal",
+      password: "password"
+    )
+    
+    let wallet = Wallet(
+      actingUser: user,
+      bindingKeys: [bindingKey, bindingKey],
+      dPoPConstructor: DPoPConstructor(
+        algorithm: alg,
+        jwk: publicKeyJWK,
+        privateKey: privateKeyProxy
+      )
+    )
+    
+    do {
+      try await walletInitiatedIssuanceWithOfferSDJWT_DPoP(
         wallet: wallet
       )
     } catch {
@@ -314,7 +462,7 @@ private func walletInitiatedIssuanceWithOfferSdJWT(
     scope: PID_SdJwtVC_config_id,
     claimSet: claimSet
   )
-
+  
   print("--> [ISSUANCE] Issued credential: \(credential)")
 }
 
@@ -346,6 +494,23 @@ private func walletInitiatedIssuanceWithOfferMDL_DPoP(
   let credential = try await wallet.issueByCredentialOfferUrl_DPoP(
     offerUri: url,
     scope: MDL_config_id,
+    claimSet: claimSet
+  )
+  
+  print("--> [ISSUANCE] Issued credential : \(credential)")
+}
+
+private func walletInitiatedIssuanceWithOfferSDJWT_DPoP(
+  wallet: Wallet,
+  claimSet: ClaimSet? = nil
+) async throws {
+  
+  print("[[Scenario: Offer passed to wallet via url]] ")
+  
+  let url = "\(CREDENTIAL_ISSUER_PUBLIC_URL)/credentialoffer?credential_offer=\(SdJwtVC_CredentialOffer)"
+  let credential = try await wallet.issueByCredentialOfferUrl_DPoP(
+    offerUri: url,
+    scope: PID_SdJwtVC_config_id,
     claimSet: claimSet
   )
   

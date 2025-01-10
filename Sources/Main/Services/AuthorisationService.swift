@@ -22,21 +22,28 @@ public protocol AuthorisationServiceType {
     poster: PostingType,
     url: URL,
     request: T
-  ) async throws -> U
+  ) async throws -> ResponseWithHeaders<U>
+  
+  func formPost<T: Codable, U: Codable>(
+    poster: PostingType,
+    url: URL,
+    request: T,
+    headers: [String: String]
+  ) async throws -> ResponseWithHeaders<U>
   
   func formPost<U: Codable>(
     poster: PostingType,
     url: URL,
     headers: [String: String],
     parameters: [String: String]
-  ) async throws -> U
+  ) async throws -> ResponseWithHeaders<U>
   
   func formPost<U: Codable>(
     poster: PostingType,
     url: URL,
     headers: [String: String],
     body: [String: Any]
-  ) async throws -> U
+  ) async throws -> ResponseWithHeaders<U>
 }
 
 /// An implementation of the `AuthorisationServiceType` protocol.
@@ -49,16 +56,31 @@ public actor AuthorisationService: AuthorisationServiceType {
     poster: PostingType = Poster(),
     url: URL,
     request: T
-  ) async throws -> U {
-    let post = FormPost(
-      additionalHeaders: [
-        ContentType.key.rawValue: ContentType.form.rawValue
-      ],
+  ) async throws -> ResponseWithHeaders<U> {
+    let post = try FormPost(
       url: url,
+      contentType: .form,
       formData: try request.toDictionary()
     )
     
-    let result: Result<U, PostError> = await poster.post(request: post.urlRequest)
+    let result: Result<ResponseWithHeaders<U>, PostError> = await poster.post(request: post.urlRequest)
+    return try result.get()
+  }
+  
+  public func formPost<T: Codable, U: Codable>(
+    poster: PostingType,
+    url: URL,
+    request: T,
+    headers: [String: String]
+  ) async throws -> ResponseWithHeaders<U> {
+    let post = try FormPost(
+      url: url,
+      contentType: .form,
+      additionalHeaders: headers,
+      formData: try request.toDictionary()
+    )
+    
+    let result: Result<ResponseWithHeaders<U>, PostError> = await poster.post(request: post.urlRequest)
     return try result.get()
   }
   
@@ -67,18 +89,15 @@ public actor AuthorisationService: AuthorisationServiceType {
     url: URL,
     headers: [String: String] = [:],
     parameters: [String: String]
-  ) async throws -> U {
-    let post = FormPost(
-      additionalHeaders: [
-        ContentType.key.rawValue: ContentType.form.rawValue
-      ].merging(headers, uniquingKeysWith: { _, new in
-        new
-      }),
+  ) async throws -> ResponseWithHeaders<U> {
+    let post = try FormPost(
       url: url,
+      contentType: .form,
+      additionalHeaders: headers,
       formData: parameters
     )
     
-    let result: Result<U, PostError> = await poster.post(request: post.urlRequest)
+    let result: Result<ResponseWithHeaders<U>, PostError> = await poster.post(request: post.urlRequest)
     return try result.get()
   }
   
@@ -87,20 +106,15 @@ public actor AuthorisationService: AuthorisationServiceType {
     url: URL,
     headers: [String: String],
     body: [String: Any]
-  ) async throws -> U {
-    let headers = [
-      ContentType.key.rawValue: ContentType.json.rawValue
-    ].merging(headers, uniquingKeysWith: { _, new in
-      new
-    })
-    
-    let post = FormPost(
-      additionalHeaders: headers,
+  ) async throws -> ResponseWithHeaders<U> {
+    let post = try FormPost(
       url: url,
+      contentType: .json,
+      additionalHeaders: headers,
       formData: body
     )
     
-    let result: Result<U, PostError> = await poster.post(request: post.urlRequest)
+    let result: Result<ResponseWithHeaders<U>, PostError> = await poster.post(request: post.urlRequest)
     return try result.get()
   }
 }

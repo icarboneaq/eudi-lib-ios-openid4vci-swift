@@ -15,19 +15,24 @@
  */
 import Foundation
 
-public func convertToJsonString(dictionary: [String: Any]) -> String? {
-  do {
-    let jsonData = try JSONSerialization.data(withJSONObject: dictionary, options: [])
-    let jsonString = String(data: jsonData, encoding: .utf8)
-    return jsonString
-  } catch {
+public extension HTTPURLResponse {
+  
+  private func valueForHeader(_ header: String) -> String? {
+    let lowercasedHeader = header.lowercased()
+    for (key, value) in allHeaderFields {
+      if let keyString = key as? String, keyString.lowercased() == lowercasedHeader {
+        return value as? String
+      }
+    }
     return nil
+  }
+  
+  func containsDpopError() -> Bool {
+    guard statusCode == HTTPStatusCode.unauthorized,
+          let wwwAuth = valueForHeader("WWW-Authenticate") else {
+      return false
+    }
+    return wwwAuth.contains("DPoP") && wwwAuth.contains("error=\"use_dpop_nonce\"")
   }
 }
 
-public func unwrapOrThrow<T>(_ optional: T?, error: Error) throws -> T {
-  guard let unwrapped = optional else {
-    throw error
-  }
-  return unwrapped
-}

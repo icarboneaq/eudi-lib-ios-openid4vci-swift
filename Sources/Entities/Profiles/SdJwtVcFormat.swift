@@ -38,13 +38,14 @@ public struct SdJwtVcFormat: FormatProfile {
 public extension SdJwtVcFormat {
   
   struct SdJwtVcSingleCredential: Codable {
-    public let proof: Proof?
+    public let proofs: [Proof]
     public let format: String = SdJwtVcFormat.FORMAT
     public let vct: String?
     public let credentialEncryptionJwk: JWK?
     public let credentialEncryptionKey: SecKey?
     public let credentialResponseEncryptionAlg: JWEAlgorithm?
     public let credentialResponseEncryptionMethod: JOSEEncryptionMethod?
+    public let claimSet: ClaimSet?
     public let credentialDefinition: CredentialDefinition
     public let requestedCredentialResponseEncryption: RequestedCredentialResponseEncryption
     public let credentialIdentifier: CredentialIdentifier?
@@ -54,21 +55,23 @@ public extension SdJwtVcFormat {
       case credentialEncryptionJwk
       case credentialResponseEncryptionAlg
       case credentialResponseEncryptionMethod
+      case claimSet
       case credentialDefinition
       case credentialIdentifier
     }
     
     public init(
-      proof: Proof?,
+      proofs: [Proof],
       vct: String?,
       credentialEncryptionJwk: JWK? = nil,
       credentialEncryptionKey: SecKey? = nil,
       credentialResponseEncryptionAlg: JWEAlgorithm? = nil,
       credentialResponseEncryptionMethod: JOSEEncryptionMethod? = nil,
+      claimSet: ClaimSet? = nil,
       credentialDefinition: CredentialDefinition,
       credentialIdentifier: CredentialIdentifier?
     ) throws {
-      self.proof = proof
+      self.proofs = proofs
       self.vct = vct
       self.credentialEncryptionJwk = credentialEncryptionJwk
       self.credentialEncryptionKey = credentialEncryptionKey
@@ -86,6 +89,7 @@ public extension SdJwtVcFormat {
         responseEncryptionAlg: credentialResponseEncryptionAlg,
         responseEncryptionMethod: credentialResponseEncryptionMethod
       )
+      self.claimSet = claimSet
     }
     
     public init(from decoder: Decoder) throws {
@@ -94,7 +98,7 @@ public extension SdJwtVcFormat {
     
     public func encode(to encoder: Encoder) throws {
       var container = encoder.container(keyedBy: CodingKeys.self)
-      try container.encode(proof, forKey: .proof)
+      try container.encode(proofs, forKey: .proof)
       
       if let credentialEncryptionJwk = credentialEncryptionJwk as? RSAPublicKey {
         try container.encode(credentialEncryptionJwk, forKey: .credentialEncryptionJwk)
@@ -106,6 +110,7 @@ public extension SdJwtVcFormat {
       try container.encode(credentialResponseEncryptionMethod, forKey: .credentialResponseEncryptionMethod)
       
       try container.encode(credentialDefinition, forKey: .credentialDefinition)
+      try container.encode(claimSet, forKey: .claimSet)
     }
     
     public struct CredentialDefinition: Codable {
@@ -178,6 +183,7 @@ public extension SdJwtVcFormat {
     public let proofTypesSupported: [String: ProofSigningAlgorithmsSupported]?
     public let display: [Display]?
     public let credentialDefinition: CredentialDefinitionTO
+    public let claims: [String: Claim]?
     
     enum CodingKeys: String, CodingKey {
       case format
@@ -188,6 +194,7 @@ public extension SdJwtVcFormat {
       case proofTypesSupported = "proof_types_supported"
       case display
       case credentialDefinition = "credential_definition"
+      case claims
     }
     
     public init(
@@ -198,6 +205,7 @@ public extension SdJwtVcFormat {
       credentialSigningAlgValuesSupported: [String]? = nil,
       proofTypesSupported: [String: ProofSigningAlgorithmsSupported]? = nil,
       display: [Display]? = nil,
+      claims: [String : Claim]? = nil,
       credentialDefinition: CredentialDefinitionTO
     ) {
       self.format = format
@@ -208,6 +216,7 @@ public extension SdJwtVcFormat {
       self.proofTypesSupported = proofTypesSupported
       self.display = display
       self.credentialDefinition = credentialDefinition
+      self.claims = claims
     }
     
     func toDomain() throws -> SdJwtVcFormat.CredentialConfiguration {
@@ -220,6 +229,19 @@ public extension SdJwtVcFormat {
       let credentialSigningAlgValuesSupported: [String] = self.credentialSigningAlgValuesSupported ?? []
       let credentialDefinition = self.credentialDefinition.toDomain()
       
+      let claims: SdJwtVCMetadataClaims = claims?.mapValues { claim in
+          Claim(
+            mandatory: claim.mandatory ?? false,
+            valueType: claim.valueType,
+            display: claim.display?.compactMap {
+              Display(
+                name: $0.name,
+                locale: $0.locale
+              )
+            }
+          )
+      } ?? [:]
+      
       return .init(
         scope: scope, 
         vct: vct,
@@ -227,7 +249,8 @@ public extension SdJwtVcFormat {
         credentialSigningAlgValuesSupported: credentialSigningAlgValuesSupported,
         proofTypesSupported: self.proofTypesSupported,
         display: display,
-        credentialDefinition: credentialDefinition
+        credentialDefinition: credentialDefinition,
+        claims: claims
       )
     }
   }
@@ -239,6 +262,7 @@ public extension SdJwtVcFormat {
     public let credentialSigningAlgValuesSupported: [String]
     public let proofTypesSupported: [String: ProofSigningAlgorithmsSupported]?
     public let display: [Display]
+    public let claims: SdJwtVCMetadataClaims
     public let credentialDefinition: CredentialDefinition
     
     enum CodingKeys: String, CodingKey {
@@ -249,6 +273,7 @@ public extension SdJwtVcFormat {
       case proofTypesSupported = "proof_types_supported"
       case display
       case credentialDefinition = "credential_definition"
+      case claims
     }
     
     var claimList: [String] {
@@ -262,7 +287,8 @@ public extension SdJwtVcFormat {
       credentialSigningAlgValuesSupported: [String],
       proofTypesSupported: [String: ProofSigningAlgorithmsSupported]?,
       display: [Display],
-      credentialDefinition: CredentialDefinition
+      credentialDefinition: CredentialDefinition,
+      claims: SdJwtVCMetadataClaims
     ) {
       self.scope = scope
       self.vct = vct
@@ -271,6 +297,7 @@ public extension SdJwtVcFormat {
       self.proofTypesSupported = proofTypesSupported
       self.display = display
       self.credentialDefinition = credentialDefinition
+      self.claims = claims
     }
     
     public init(from decoder: Decoder) throws {
@@ -285,6 +312,7 @@ public extension SdJwtVcFormat {
       
       display = try container.decode([Display].self, forKey: .display)
       credentialDefinition = try container.decode(CredentialDefinition.self, forKey: .credentialDefinition)
+      claims = try container.decode(SdJwtVCMetadataClaims.self, forKey: .claims)
     }
     
     public func encode(to encoder: Encoder) throws {
@@ -295,6 +323,7 @@ public extension SdJwtVcFormat {
       try container.encode(proofTypesSupported, forKey: .proofTypesSupported)
       try container.encode(display, forKey: .display)
       try container.encode(credentialDefinition, forKey: .credentialDefinition)
+      try container.encode(claims, forKey: .claims)
     }
     
     init(json: JSON) throws {
@@ -318,19 +347,22 @@ public extension SdJwtVcFormat {
       self.display = json["display"].arrayValue.map { json in
         Display(json: json)
       }
+      
       self.credentialDefinition = CredentialDefinition(json: json["credential_definition"])
+      
+      self.claims = SdJwtVCMetadataClaims(json: json["claims"])
     }
     
     func toIssuanceRequest(
       responseEncryptionSpec: IssuanceResponseEncryptionSpec?,
       credentialIdentifier: CredentialIdentifier? = nil,
       claimSet: ClaimSet?,
-      proof: Proof?
+      proofs: [Proof]
     ) throws -> CredentialIssuanceRequest {
       try .single(
         .sdJwtVc(
           .init(
-            proof: proof, 
+            proofs: proofs,
             vct: vct,
             credentialEncryptionJwk: responseEncryptionSpec?.jwk,
             credentialEncryptionKey: responseEncryptionSpec?.privateKey,

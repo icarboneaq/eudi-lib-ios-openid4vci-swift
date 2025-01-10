@@ -16,30 +16,35 @@
 import Foundation
 import JOSESwift
 
+public enum SigningKeyProxy {
+  case custom(any AsyncSignerProtocol)
+  case secKey(SecKey)
+}
+
 public enum BindingKey {
-  
+
   // JWK Binding Key
   case jwk(
     algorithm: JWSAlgorithm,
     jwk: JWK,
-    privateKey: SecKey,
+    privateKey: SigningKeyProxy,
     issuer: String? = nil
   )
-  
+
   // DID Binding Key
   case did(identity: String)
-  
+
   // X509 Binding Key
   case x509(certificate: X509Certificate)
 }
 
 public extension BindingKey {
-  
+
   func toSupportedProof(
     issuanceRequester: IssuanceRequesterType,
     credentialSpec: CredentialSupported,
     cNonce: String?
-  ) throws -> Proof {
+  ) async throws -> Proof {
     switch self {
     case .jwk(
       let algorithm,
@@ -58,15 +63,15 @@ public extension BindingKey {
         guard proofs else {
           throw CredentialIssuanceError.proofTypeNotSupported
         }
-        
+
         let aud = issuanceRequester.issuerMetadata.credentialIssuerIdentifier.url.absoluteString
-        
+
         let header = try JWSHeader(parameters: [
           "typ": "openid4vci-proof+jwt",
           "alg": algorithm.name,
           "jwk": jwk.toDictionary()
         ])
-        
+
         let dictionary: [String: Any] = [
           JWTClaimNames.issuedAt: Int(Date().timeIntervalSince1970.rounded()),
           JWTClaimNames.audience: aud,
@@ -78,26 +83,26 @@ public extension BindingKey {
           }
           return true
         }
-        
+
         let payload = Payload(try dictionary.toThrowingJSONData())
-        
+
         guard let signatureAlgorithm = SignatureAlgorithm(rawValue: algorithm.name) else {
           throw CredentialIssuanceError.cryptographicAlgorithmNotSupported
         }
         
-        guard let signer = Signer(
-          signingAlgorithm: signatureAlgorithm,
-          key: privateKey
-        ) else {
-          throw ValidationError.error(reason: "Unable to create JWS signer")
-        }
-        
+        let signer: Signer = try await Self.createSigner(
+          with: header,
+          and: payload,
+          for: privateKey,
+          and: signatureAlgorithm
+        )
+
         let jws = try JWS(
           header: header,
           payload: payload,
           signer: signer
         )
-        
+
         return .jwt(jws.compactSerializedString)
 
       case .sdJwtVc(let spec):
@@ -110,22 +115,15 @@ public extension BindingKey {
         guard proofs else {
           throw CredentialIssuanceError.proofTypeNotSupported
         }
-        
-        /*
-        let bindings = spec.cryptographicBindingMethodsSupported.contains { $0  == .jwk }
-        guard bindings else {
-          throw CredentialIssuanceError.cryptographicBindingMethodNotSupported
-        }
-         */
-        
+
         let aud = issuanceRequester.issuerMetadata.credentialIssuerIdentifier.url.absoluteString
-        
+
         let header = try JWSHeader(parameters: [
           "typ": "openid4vci-proof+jwt",
           "alg": algorithm.name,
           "jwk": jwk.toDictionary()
         ])
-        
+
         let dictionary: [String: Any] = [
           JWTClaimNames.issuedAt: Int(Date().timeIntervalSince1970.rounded()),
           JWTClaimNames.audience: aud,
@@ -137,26 +135,26 @@ public extension BindingKey {
           }
           return true
         }
-        
+
         let payload = Payload(try dictionary.toThrowingJSONData())
-        
+
         guard let signatureAlgorithm = SignatureAlgorithm(rawValue: algorithm.name) else {
           throw CredentialIssuanceError.cryptographicAlgorithmNotSupported
         }
-        
-        guard let signer = Signer(
-          signingAlgorithm: signatureAlgorithm,
-          key: privateKey
-        ) else {
-          throw ValidationError.error(reason: "Unable to create JWS signer")
-        }
-        
+
+        let signer: Signer = try await Self.createSigner(
+          with: header,
+          and: payload,
+          for: privateKey,
+          and: signatureAlgorithm
+        )
+
         let jws = try JWS(
           header: header,
           payload: payload,
           signer: signer
         )
-        
+
         return .jwt(jws.compactSerializedString)
       default: break
       }
@@ -170,6 +168,55 @@ public extension BindingKey {
   }
 }
 
-private extension BindingKey {
-  
+extension BindingKey {
+
+  static func createSigner(
+    with header: JWSHeader,
+    and payload: Payload,
+    for privateKey: SigningKeyProxy,
+    and signatureAlgorithm: SignatureAlgorithm
+  ) async throws -> Signer {
+
+    if case let .secKey(secKey) = privateKey,
+       let secKeySigner = Signer(
+        signatureAlgorithm: signatureAlgorithm,
+        key: secKey
+       ) {
+      return secKeySigner
+      
+    } else if case let .custom(customAsyncSigner) = privateKey {
+      let headerData = header as DataConvertible
+      let signature = try await customAsyncSigner.signAsync(
+        headerData.data(),
+        payload.data()
+      )
+      
+      let customSigner = PrecomputedSigner(
+        signature: signature,
+        algorithm: signatureAlgorithm
+      )
+      return Signer(customSigner: customSigner)
+      
+    } else {
+      throw ValidationError.error(reason: "Unable to create JWS signer")
+    }
+  }
+}
+
+class PrecomputedSigner: JOSESwift.SignerProtocol {
+	var algorithm: JOSESwift.SignatureAlgorithm
+	let signature: Data
+	
+	init(signature: Data, algorithm: JOSESwift.SignatureAlgorithm) {
+		self.algorithm = algorithm
+		self.signature = signature
+	}
+	
+	func sign(_ signingInput: Data) throws -> Data {
+		return signature
+	}
+}
+
+public protocol AsyncSignerProtocol {
+  func signAsync(_ header: Data, _ payload: Data) async throws -> Data
 }

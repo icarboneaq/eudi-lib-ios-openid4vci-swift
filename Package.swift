@@ -13,11 +13,11 @@ let package = Package(
     ),
   ],
   dependencies: [
-    .package(url: "https://github.com/SwiftyJSON/SwiftyJSON.git", from: "4.0.0"),
+    .package(url: "https://github.com/SwiftyJSON/SwiftyJSON.git", from: "5.0.1"),
     .package(url: "https://github.com/scinfu/SwiftSoup.git", from: "2.6.0"),
     .package(
-      url: "https://github.com/niscy-eudiw/JOSESwift.git",
-      exact: "2.4.1-gcm"
+      url: "https://github.com/airsidemobile/JOSESwift.git",
+      from: "3.0.0"
     ),
   ],
   targets: [
@@ -45,10 +45,6 @@ let package = Package(
         .product(
           name: "SwiftyJSON",
           package: "SwiftyJSON"
-        ),
-        .product(
-          name: "JOSESwift",
-          package: "JOSESwift"
         ),
         .product(
           name: "SwiftSoup",

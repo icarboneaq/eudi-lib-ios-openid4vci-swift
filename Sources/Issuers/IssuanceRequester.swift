@@ -23,23 +23,24 @@ public protocol IssuanceRequesterType {
   
   func placeIssuanceRequest(
     accessToken: IssuanceAccessToken,
-    request: SingleCredential
-  ) async throws -> Result<CredentialIssuanceResponse, Error>
-  
-  func placeBatchIssuanceRequest(
-    accessToken: IssuanceAccessToken,
-    request: [SingleCredential]
+    request: SingleCredential,
+    dPopNonce: Nonce?,
+    retry: Bool
   ) async throws -> Result<CredentialIssuanceResponse, Error>
   
   func placeDeferredCredentialRequest(
     accessToken: IssuanceAccessToken,
     transactionId: TransactionId,
+    dPopNonce: Nonce?,
+    retry: Bool,
     issuanceResponseEncryptionSpec: IssuanceResponseEncryptionSpec?
   ) async throws -> Result<DeferredCredentialIssuanceResponse, Error>
   
   func notifyIssuer(
     accessToken: IssuanceAccessToken?,
-    notification: NotificationObject
+    notification: NotificationObject,
+    dPopNonce: Nonce?,
+    retry: Bool
   ) async throws -> Result<Void, Error>
 }
 
@@ -64,26 +65,41 @@ public actor IssuanceRequester: IssuanceRequesterType {
   
   public func placeIssuanceRequest(
     accessToken: IssuanceAccessToken,
-    request: SingleCredential
+    request: SingleCredential,
+    dPopNonce: Nonce?,
+    retry: Bool
   ) async throws -> Result<CredentialIssuanceResponse, Error> {
     let endpoint = issuerMetadata.credentialEndpoint.url
     
     do {
-      let authorizationHeader: [String: String] = try accessToken.dPoPOrBearerAuthorizationHeader(
+      let authorizationHeader: [String: String] = try await accessToken.dPoPOrBearerAuthorizationHeader(
         dpopConstructor: dpopConstructor,
+        dPopNonce: dPopNonce,
         endpoint: endpoint
       )
       
       let encodedRequest: [String: Any] = try request.toDictionary().dictionaryValue
       
-      let response: SingleIssuanceSuccessResponse = try await service.formPost(
+      let response: ResponseWithHeaders<SingleIssuanceSuccessResponse> = try await service.formPost(
         poster: poster,
         url: endpoint,
         headers: authorizationHeader,
         body: encodedRequest
       )
       
-      return .success(try response.toSingleIssuanceResponse())
+      return .success(try response.body.toSingleIssuanceResponse())
+      
+    } catch PostError.useDpopNonce(let nonce) {
+      if retry {
+        return try await placeIssuanceRequest(
+          accessToken: accessToken,
+          request: request,
+          dPopNonce: nonce,
+          retry: false
+        )
+      } else {
+        return .failure(ValidationError.retryFailedAfterDpopNonce)
+      }
       
     } catch PostError.response(let response) {
       return .failure(response.toIssuanceError())
@@ -181,64 +197,46 @@ public actor IssuanceRequester: IssuanceRequesterType {
     }
   }
   
-  public func placeBatchIssuanceRequest(
-    accessToken: IssuanceAccessToken,
-    request: [SingleCredential]
-  ) async throws -> Result<CredentialIssuanceResponse, Error> {
-    guard
-      let endpoint = issuerMetadata.batchCredentialEndpoint?.url
-    else {
-      throw CredentialIssuanceError.issuerDoesNotSupportBatchIssuance
-    }
-    
-    do {
-      let authorizationHeader: [String: Any] = try accessToken.dPoPOrBearerAuthorizationHeader(
-        dpopConstructor: dpopConstructor,
-        endpoint: endpoint
-      )
-      
-      let encodedRequest: [JSON] = try request
-        .map { try $0.toDictionary() }
-      
-      let merged = authorizationHeader.merging(["credential_requests": encodedRequest]) { (_, new) in new }
-      
-      let response: BatchIssuanceSuccessResponse = try await service.formPost(
-        poster: poster,
-        url: endpoint,
-        headers: [:],
-        body: merged
-      )
-      return .success(try response.toBatchIssuanceResponse())
-      
-    } catch {
-      return .failure(ValidationError.error(reason: error.localizedDescription))
-    }
-  }
-  
   public func placeDeferredCredentialRequest(
     accessToken: IssuanceAccessToken,
     transactionId: TransactionId,
+    dPopNonce: Nonce?,
+    retry: Bool,
     issuanceResponseEncryptionSpec: IssuanceResponseEncryptionSpec?
   ) async throws -> Result<DeferredCredentialIssuanceResponse, Error> {
     guard let deferredCredentialEndpoint = issuerMetadata.deferredCredentialEndpoint else {
       throw CredentialError.issuerDoesNotSupportDeferredIssuance
     }
     
-    let authorizationHeader: [String: String] = try accessToken.dPoPOrBearerAuthorizationHeader(
+    let authorizationHeader: [String: String] = try await accessToken.dPoPOrBearerAuthorizationHeader(
       dpopConstructor: dpopConstructor,
+      dPopNonce: dPopNonce,
       endpoint: deferredCredentialEndpoint.url
     )
     
     let encodedRequest: [String: Any] = try JSON(transactionId.toDeferredRequestTO().toDictionary()).dictionaryValue
     
     do {
-      let response: DeferredCredentialIssuanceResponse = try await service.formPost(
+      let response: ResponseWithHeaders<DeferredCredentialIssuanceResponse> = try await service.formPost(
         poster: poster,
         url: deferredCredentialEndpoint.url,
         headers: authorizationHeader,
         body: encodedRequest
       )
-      return .success(response)
+      return .success(response.body)
+      
+    } catch PostError.useDpopNonce(let nonce) {
+      if retry {
+        return try await placeDeferredCredentialRequest(
+          accessToken: accessToken,
+          transactionId: transactionId,
+          dPopNonce: nonce,
+          retry: false,
+          issuanceResponseEncryptionSpec: issuanceResponseEncryptionSpec
+        )
+      } else {
+        return .failure(ValidationError.retryFailedAfterDpopNonce)
+      }
       
     } catch PostError.response(let response) {
       
@@ -285,7 +283,9 @@ public actor IssuanceRequester: IssuanceRequesterType {
   
   public func notifyIssuer(
     accessToken: IssuanceAccessToken?,
-    notification: NotificationObject
+    notification: NotificationObject,
+    dPopNonce: Nonce?,
+    retry: Bool
   ) async throws -> Result<Void, Error> {
     do {
       
@@ -298,8 +298,9 @@ public actor IssuanceRequester: IssuanceRequesterType {
       }
       
       let endpoint = notificationEndpoint.url
-      let authorizationHeader: [String: String] = try accessToken.dPoPOrBearerAuthorizationHeader(
+      let authorizationHeader: [String: String] = try await accessToken.dPoPOrBearerAuthorizationHeader(
         dpopConstructor: dpopConstructor,
+        dPopNonce: dPopNonce,
         endpoint: endpoint
       )
       
@@ -311,13 +312,25 @@ public actor IssuanceRequester: IssuanceRequesterType {
       let encodedRequest: [String: Any] = JSON(payload.toDictionary()).dictionaryValue
       
       do {
-        let _: EmptyResponse = try await service.formPost(
+        let _: ResponseWithHeaders<EmptyResponse> = try await service.formPost(
           poster: poster,
           url: endpoint,
           headers: authorizationHeader,
           body: encodedRequest
         )
         return .success(())
+        
+      } catch PostError.useDpopNonce(let nonce) {
+        if retry {
+          return try await notifyIssuer(
+            accessToken: accessToken,
+            notification: notification,
+            dPopNonce: nonce,
+            retry: false
+          )
+        } else {
+          return .failure(ValidationError.retryFailedAfterDpopNonce)
+        }
         
       } catch PostError.response(let response) {
         return .failure(response.toIssuanceError())
@@ -355,10 +368,38 @@ private extension IssuanceRequester {
 
 private extension SingleIssuanceSuccessResponse {
   func toSingleIssuanceResponse() throws -> CredentialIssuanceResponse {
-    if let credential = credential {
+    if let credential = credential,
+       let string = credential.string {
       return CredentialIssuanceResponse(
-        credentialResponses: [.issued(format: format ?? "", credential: credential, notificationId: nil)],
-        cNonce: CNonce(value: cNonce, expiresInSeconds: cNonceExpiresInSeconds)
+        credentialResponses: [
+          .issued(
+            format: nil,
+            credential: .string(string),
+            notificationId: nil,
+            additionalInfo: nil
+          )
+        ],
+        cNonce: .init(
+          value: cNonce,
+          expiresInSeconds: cNonceExpiresInSeconds
+        )
+      )
+    } else if let credentials = credentials,
+              let jsonObject = credentials.array,
+              !jsonObject.isEmpty {
+      return .init(
+        credentialResponses: [
+          .issued(
+            format: nil,
+            credential: .json(JSON(jsonObject)),
+            notificationId: nil,
+            additionalInfo: nil
+          )
+        ],
+        cNonce: .init(
+          value: cNonce,
+          expiresInSeconds: cNonceExpiresInSeconds
+        )
       )
     } else if let transactionId = transactionId {
       return CredentialIssuanceResponse(
@@ -368,26 +409,5 @@ private extension SingleIssuanceSuccessResponse {
       
     }
     throw CredentialIssuanceError.responseUnparsable("Got success response for issuance but response misses 'transaction_id' and 'certificate' parameters")
-  }
-}
-
-private extension BatchIssuanceSuccessResponse {
-  func toBatchIssuanceResponse() throws -> CredentialIssuanceResponse {
-    func mapResults() throws -> [CredentialIssuanceResponse.Result] {
-      return try credentialResponses.map { response in
-        if let transactionId = response.transactionId {
-          return CredentialIssuanceResponse.Result.deferred(transactionId: try .init(value: transactionId))
-        } else if let credential = response.credential {
-          return CredentialIssuanceResponse.Result.issued(format: nil, credential: credential, notificationId: nil)
-        } else {
-          throw CredentialIssuanceError.responseUnparsable("Got success response for issuance but response misses 'transaction_id' and 'certificate' parameters")
-        }
-      }
-    }
-    
-    return CredentialIssuanceResponse(
-      credentialResponses: try mapResults(),
-      cNonce: CNonce(value: cNonce, expiresInSeconds: cNonceExpiresInSeconds)
-    )
   }
 }

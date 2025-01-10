@@ -23,7 +23,7 @@ public struct Constants {
   public static let CLIENT_ID_PARAM = "client_id"
   public static let CODE_VERIFIER_PARAM = "code_verifier"
   public static let AUTHORIZATION_CODE_PARAM = "code"
-  
+  public static let AUTHORIZATION_DETAILS = "authorization_details"
   public static let USER_PIN_PARAM = "user_pin"
   public static let PRE_AUTHORIZED_CODE_PARAM = "pre-authorized_code"
   
@@ -31,4 +31,7 @@ public struct Constants {
   public static let TX_CODE_PARAM = "tx_code"
     
   public static let url = "https://a.bc"
+  
+  public static let DPOP_NONCE_HEADER = "DPoP-Nonce"
+  public static let USE_DPOP_NONCE = "use_dpop_nonce"
 }
