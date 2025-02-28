@@ -25,7 +25,7 @@ public protocol IssuerType {
   func authorizeWithPreAuthorizationCode(
     credentialOffer: CredentialOffer,
     authorizationCode: IssuanceAuthorization,
-    clientId: String,
+    client: Client,
     transactionCode: String?,
     authorizationDetailsInTokenRequest: AuthorizationDetailsInTokenRequest
   ) async -> Result<AuthorizedRequest, Error>
@@ -64,6 +64,12 @@ public protocol IssuerType {
     notificationId: NotificationObject,
     dPopNonce: Nonce?
   ) async throws -> Result<Void, Error>
+  
+  func refresh(
+    clientId: String,
+    authorizedRequest: AuthorizedRequest,
+    dPopNonce: Nonce?
+  ) async -> Result<AuthorizedRequest, Error>
 }
 
 public actor Issuer: IssuerType {
@@ -103,8 +109,12 @@ public actor Issuer: IssuerType {
       dpopConstructor: dpopConstructor
     )
     
+    try config.client.ensureSupportedByAuthorizationServer(
+      self.authorizationServerMetadata
+    )
+    
     issuanceRequester = IssuanceRequester(
-      issuerMetadata: issuerMetadata, 
+      issuerMetadata: issuerMetadata,
       poster: requesterPoster,
       dpopConstructor: dpopConstructor
     )
@@ -126,24 +136,24 @@ public actor Issuer: IssuerType {
     let credentials = credentialOffer.credentialConfigurationIdentifiers
     let issuerState: String? = switch credentialOffer.grants {
     case .authorizationCode(let code),
-         .both(let code, _):
+        .both(let code, _):
       code.issuerState
     default:
       nil
     }
     
     let (scopes, credentialConfogurationIdentifiers) = try scopesAndCredentialConfigurationIds(credentialOffer: credentialOffer)
-
+    
     let authorizationServerSupportsPar = credentialOffer.authorizationServerMetadata.authorizationServerSupportsPar && config.usePAR
-
+    
     let state = StateValue().value
-
+    
     if authorizationServerSupportsPar {
       do {
         let resource: String? = issuerMetadata.authorizationServers.map { _ in
           credentialOffer.credentialIssuerIdentifier.url.absoluteString
         }
-
+        
         let result: (
           verifier: PKCEVerifier,
           code: GetAuthorizationCodeURL,
@@ -199,14 +209,14 @@ public actor Issuer: IssuerType {
       } catch {
         return .failure(ValidationError.error(reason: error.localizedDescription))
       }
-
+      
     }
   }
   
   public func authorizeWithPreAuthorizationCode(
     credentialOffer: CredentialOffer,
     authorizationCode: IssuanceAuthorization,
-    clientId: String,
+    client: Client,
     transactionCode: String?,
     authorizationDetailsInTokenRequest: AuthorizationDetailsInTokenRequest = .doNotInclude
   ) async -> Result<AuthorizedRequest, Error> {
@@ -215,13 +225,13 @@ public actor Issuer: IssuerType {
     case .preAuthorizationCode(let authorisation, let txCode):
       do {
         if let transactionCode, let txCode {
-            if txCode.length != transactionCode.count {
-              throw ValidationError.error(reason: "Expected transaction code length is \(txCode.length ?? 0) but code of length \(transactionCode.count) passed")
-            }
-
-            if txCode.inputMode != .numeric {
-              throw ValidationError.error(reason: "Issuers expects transaction code to be numeric but is not.")
-            }
+          if txCode.length != transactionCode.count {
+            throw ValidationError.error(reason: "Expected transaction code length is \(txCode.length ?? 0) but code of length \(transactionCode.count) passed")
+          }
+          
+          if txCode.inputMode != .numeric {
+            throw ValidationError.error(reason: "Issuers expects transaction code to be numeric but is not.")
+          }
         }
         
         let credConfigIdsAsAuthDetails: [CredentialConfigurationIdentifier] = switch authorizationDetailsInTokenRequest {
@@ -232,7 +242,7 @@ public actor Issuer: IssuerType {
         let response = try await authorizer.requestAccessTokenPreAuthFlow(
           preAuthorizedCode: authorisation,
           txCode: txCode,
-          clientId: clientId,
+          client: client,
           transactionCode: transactionCode,
           identifiers: credConfigIdsAsAuthDetails,
           dpopNonce: nil,
@@ -241,19 +251,21 @@ public actor Issuer: IssuerType {
         
         switch response {
         case .success(
-          (let accessToken, let nonce, let identifiers, let expiresIn, let dPopNonce)
+          (let accessToken, let refreshToken, let nonce, let identifiers, let expiresIn, let dPopNonce)
         ):
           if let cNonce = nonce {
             return .success(
               .proofRequired(
-                accessToken: try IssuanceAccessToken(
+                accessToken: try .init(
                   accessToken: accessToken.accessToken,
-                  tokenType: accessToken.tokenType, 
-                  expiresIn: TimeInterval(expiresIn ?? .zero)
+                  tokenType: accessToken.tokenType,
+                  expiresIn: expiresIn?.asTimeInterval ?? .zero
                 ),
-                refreshToken: nil,
+                refreshToken: try .init(
+                  refreshToken: refreshToken.refreshToken
+                ),
                 cNonce: cNonce,
-                credentialIdentifiers: identifiers, 
+                credentialIdentifiers: identifiers,
                 timeStamp: Date().timeIntervalSinceReferenceDate,
                 dPopNonce: dPopNonce
               )
@@ -264,9 +276,11 @@ public actor Issuer: IssuerType {
                 accessToken: try IssuanceAccessToken(
                   accessToken: accessToken.accessToken,
                   tokenType: accessToken.tokenType,
-                  expiresIn: TimeInterval(expiresIn ?? .zero)
+                  expiresIn: expiresIn?.asTimeInterval ?? .zero
                 ),
-                refreshToken: nil,
+                refreshToken: try .init(
+                  refreshToken: refreshToken.refreshToken
+                ),
                 credentialIdentifiers: identifiers,
                 timeStamp: Date().timeIntervalSinceReferenceDate,
                 dPopNonce: dPopNonce
@@ -307,6 +321,7 @@ public actor Issuer: IssuerType {
           
           let response: (
             accessToken: IssuanceAccessToken,
+            refreshToken: IssuanceRefreshToken,
             nonce: CNonce?,
             identifiers: AuthorizationDetailsIdentifiers?,
             tokenType: TokenType?,
@@ -316,19 +331,21 @@ public actor Issuer: IssuerType {
             authorizationCode: authorizationCode,
             codeVerifier: request.pkceVerifier.codeVerifier,
             identifiers: credConfigIdsAsAuthDetails,
-            dpopNonce: nil,
+            dpopNonce: request.dpopNonce,
             retry: true
           ).get()
           
           if let cNonce = response.nonce {
             return .success(
               .proofRequired(
-                accessToken: try IssuanceAccessToken(
+                accessToken: try .init(
                   accessToken: response.accessToken.accessToken,
                   tokenType: response.tokenType,
                   expiresIn: TimeInterval(response.expiresIn ?? .zero)
                 ),
-                refreshToken: nil,
+                refreshToken: try .init(
+                  refreshToken: response.refreshToken.refreshToken
+                ),
                 cNonce: cNonce,
                 credentialIdentifiers: response.identifiers,
                 timeStamp: Date().timeIntervalSinceReferenceDate,
@@ -338,12 +355,14 @@ public actor Issuer: IssuerType {
           } else {
             return .success(
               .noProofRequired(
-                accessToken: try IssuanceAccessToken(
+                accessToken: try .init(
                   accessToken: response.accessToken.accessToken,
                   tokenType: response.tokenType,
                   expiresIn: TimeInterval(response.expiresIn ?? .zero)
                 ),
-                refreshToken: nil,
+                refreshToken: try .init(
+                  refreshToken: response.refreshToken.refreshToken
+                ),
                 credentialIdentifiers: response.identifiers,
                 timeStamp: Date().timeIntervalSinceReferenceDate,
                 dPopNonce: response.dPopNonce
@@ -372,7 +391,8 @@ public actor Issuer: IssuerType {
               credentials: request.credentials,
               authorizationCode: try IssuanceAuthorization(authorizationCode: code),
               pkceVerifier: request.pkceVerifier,
-              configurationIds: request.configurationIds
+              configurationIds: request.configurationIds,
+              dpopNonce: request.dpopNonce
             )
           )
         )
@@ -399,7 +419,8 @@ public actor Issuer: IssuerType {
                 credentials: request.credentials,
                 authorizationCode: try IssuanceAuthorization(authorizationCode: authorizationCode),
                 pkceVerifier: request.pkceVerifier,
-                configurationIds: request.configurationIds
+                configurationIds: request.configurationIds,
+                dpopNonce: request.dpopNonce
               )
             )
           )
@@ -610,7 +631,7 @@ private extension Issuer {
     credentialConfigurationIdentifier: CredentialConfigurationIdentifier,
     responseEncryptionSpecProvider: (_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
   ) async throws -> Result<SubmittedRequest, Error> {
-      
+    
     guard let supportedCredential = issuerMetadata
       .credentialsSupported[credentialConfigurationIdentifier] else {
       throw ValidationError.error(reason: "Invalid Supported credential for requestSingle")
@@ -630,7 +651,7 @@ private extension Issuer {
     ) {
       return try supportedCredential.toIssuanceRequest(
         requester: issuanceRequester,
-        claimSet: claimSet, 
+        claimSet: claimSet,
         proofs: proofs,
         responseEncryptionSpecProvider: responseEncryptionSpecProvider
       )
@@ -715,9 +736,9 @@ public extension Issuer {
     try Issuer(
       authorizationServerMetadata: .oauth(
         .init(
-            authorizationEndpoint: Constants.url,
-            tokenEndpoint: Constants.url,
-            pushedAuthorizationRequestEndpoint: Constants.url
+          authorizationEndpoint: Constants.url,
+          tokenEndpoint: Constants.url,
+          pushedAuthorizationRequestEndpoint: Constants.url
         )
       ),
       issuerMetadata: .init(
@@ -727,7 +748,7 @@ public extension Issuer {
       deferredRequesterPoster: deferredRequesterPoster
     )
   }
-    
+  
   static func createResponseEncryptionSpec(_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec? {
     switch issuerResponseEncryptionMetadata {
     case .notRequired:
@@ -835,5 +856,57 @@ public extension Issuer {
       notification: notificationId,
       dPopNonce: dPopNonce
     )
+  }
+  
+  func refresh(
+    clientId: String,
+    authorizedRequest: AuthorizedRequest,
+    dPopNonce: Nonce? = nil
+  ) async -> Result<AuthorizedRequest, Error> {
+    
+    if  let refreshToken = authorizedRequest.refreshToken {
+      do {
+        let token = try await authorizer.refreshAccessToken(
+          clientId: clientId,
+          refreshToken: refreshToken,
+          dpopNonce: dPopNonce,
+          retry: true
+        )
+        switch token {
+        case .success((let accessToken, _, _, _, let timeStamp, _)):
+          return .success(authorizedRequest.replacing(
+            accessToken: accessToken,
+            timeStamp: timeStamp?.asTimeInterval ?? .zero
+          )
+        )
+        case .failure(let error):
+          return .failure(error)
+        }
+      } catch {
+        return .failure(error)
+      }
+    }
+    return .success(authorizedRequest)
+  }
+}
+
+internal extension Client {
+  
+  private static let ATTEST_JWT_CLIENT_AUTH = "attest_jwt_client_auth"
+  
+  func ensureSupportedByAuthorizationServer(_ authorizationServerMetadata: IdentityAndAccessManagementMetadata) throws {
+    
+    let tokenEndpointAuthMethods = authorizationServerMetadata.tokenEndpointAuthMethods
+    
+    switch self {
+    case .attested:
+      let expectedMethod = Self.ATTEST_JWT_CLIENT_AUTH
+      
+      guard tokenEndpointAuthMethods.contains(expectedMethod) else {
+        throw ValidationError.error(reason:("\(Self.ATTEST_JWT_CLIENT_AUTH) not supported by authorization server"))
+      }
+    default:
+      break
+    }
   }
 }

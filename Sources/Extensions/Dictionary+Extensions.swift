@@ -16,6 +16,10 @@
 import Foundation
 import SwiftyJSON
 
+public func + (lhs: [String: String], rhs: [String: String]) -> [String: String] {
+  return lhs.merging(rhs) { (current, new) in new }
+}
+
 public extension Dictionary where Key == String, Value == Any {
   
   func toThrowingJSONData() throws -> Data {
@@ -115,5 +119,11 @@ public extension Dictionary where Key == String, Value == Any {
     let keySet = Set(keys)
     let dictionaryKeySet = Set(self.keys)
     return keySet.isSubset(of: dictionaryKeySet)
+  }
+}
+
+extension Dictionary where Key == AnyHashable {
+  func value(forCaseInsensitiveKey key: String) -> Value? {
+    return self.first { ($0.key as? String)?.caseInsensitiveCompare(key) == .orderedSame }?.value
   }
 }

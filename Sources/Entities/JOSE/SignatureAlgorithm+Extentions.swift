@@ -14,14 +14,17 @@
  * limitations under the License.
  */
 import Foundation
+import JOSESwift
 
-public extension Int {
-  func isWithinRange(_ range: ClosedRange<Int>) -> Bool {
-    return range.contains(self)
-  }
-  
-  /// Converts an `Int` to a `TimeInterval` (Double).
-  var asTimeInterval: TimeInterval {
-    return TimeInterval(self)
+public extension SignatureAlgorithm {
+  /// Returns `true` if the algorithm is NOT a MAC-based algorithm (HMAC).
+  var isNotMacAlgorithm: Bool {
+    switch self {
+    case .HS256, .HS384, .HS512:
+      return false  // These are HMAC algorithms
+    default:
+      return true   // All other algorithms are not MAC-based
+    }
   }
 }
+
